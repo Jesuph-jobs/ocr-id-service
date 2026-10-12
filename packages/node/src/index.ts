@@ -79,8 +79,8 @@ export class OcrIdClient {
       jobId: requestId,
       attempts,
       backoff: { type: "exponential", delay: 1000 },
-      removeOnComplete: { age: 86400, count: 1000 },
-      removeOnFail: { age: 604800, count: 1000 },
+      removeOnComplete: true,
+      removeOnFail: true,
     };
     return this.queue.add("scan-id", toWorkerInput(scan, requestId), jobOptions);
   }
@@ -108,12 +108,8 @@ export class OcrIdClient {
   }
 
   public async getStatus(jobId: string): Promise<OcrJobStatus> {
-    const job = await this.queue.getJob(jobId);
-    if (!job) return { jobId, state: "failed", error: "Job not found" };
-    const state = await job.getState();
-    if (state === "completed") {
-      const rawResponse = await this.responses.lindex(`ocr:responses:${this.appId}:${jobId}`, 0);
-      if (!rawResponse) return { jobId, state };
+    const rawResponse = await this.responses.lindex(`ocr:responses:${this.appId}:${jobId}`, 0);
+    if (rawResponse) {
       const response = JSON.parse(rawResponse) as OcrServiceResponse;
       if (response.app_id !== this.appId || response.request_id !== jobId) {
         throw new Error("OCR response identity does not match the requested app and request");
@@ -121,8 +117,11 @@ export class OcrIdClient {
       if (response.state === "failed") {
         return { jobId, state: "failed", error: response.error ?? "OCR request failed" };
       }
-      return { jobId, state, result: response.result ?? undefined };
+      return { jobId, state: "completed", result: response.result ?? undefined };
     }
+    const job = await this.queue.getJob(jobId);
+    if (!job) return { jobId, state: "failed", error: "Job not found" };
+    const state = await job.getState();
     if (state === "failed") return { jobId, state, error: job.failedReason };
     return { jobId, state: state === "active" ? "processing" : "queued" };
   }

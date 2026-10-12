@@ -6,7 +6,7 @@ The OCR service has no database connection. Each onboarded application receives 
 
 For app ID `billing`, the service consumes BullMQ requests from `ocr-billing-requests` and writes each response to `ocr:responses:billing:<request-id>`. The request ID is the BullMQ job ID. Responses contain `app_id`, `request_id`, `state`, `result`, and `error`; a response list expires after `OCR_RESPONSE_TTL_SECONDS` (24 hours by default). The app backend blocks on the exact response key for its own request, so unrelated tenants and requests cannot be consumed accidentally.
 
-OCR output is not written to a database. A response remains only in its app/request-specific Redis response list until the app consumes it or its TTL expires. BullMQ request metadata is retained for up to one day after completion and seven days after failure by the Node client defaults, but the worker stores only the request ID and a response-enqueued flag in the BullMQ return value; the OCR result itself is not duplicated into the request job record.
+OCR output is not written to a database. A response remains only in its app/request-specific Redis response list until the app consumes it or its TTL expires. The Node client removes BullMQ request jobs when processing completes or fails, so the base64 image payload does not remain in completed or failed queue records. While a request is queued or processing, its input is held in Redis as a BullMQ job.
 
 ## Onboarding an app
 
