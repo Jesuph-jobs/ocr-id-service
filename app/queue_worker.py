@@ -76,6 +76,20 @@ async def provision_app_user(redis: Redis, app_id: str, prefix: str, password: s
     )
 
 
+async def provision_app_users_periodically(
+    redis: Redis, app_credentials: dict[str, str], prefix: str
+) -> None:
+    """Restore tenant ACL users if the managed Redis service restarts."""
+
+    while True:
+        await asyncio.sleep(30)
+        for app_id, password in app_credentials.items():
+            try:
+                await provision_app_user(redis, app_id, prefix, password)
+            except Exception:
+                logger.exception("Could not refresh Redis ACL for app_id=%s", app_id)
+
+
 def _safe_input_path(raw_path: str, input_dir: Path, max_image_mb: int) -> Path:
     """Resolve a path and reject traversal outside the shared input directory."""
 
@@ -128,6 +142,7 @@ async def run_worker(settings: Settings | None = None) -> None:
     Path(runtime.ocr_input_dir).mkdir(parents=True, exist_ok=True)
     engine = AlgerianIDOCR(runtime)
     responses: Redis = Redis.from_url(runtime.redis_url, decode_responses=True)
+    app_credentials: dict[str, str] = {}
     for app_id in app_ids:
         password = os.getenv(f"OCR_APP_{app_id.upper().replace('-', '_')}_PASSWORD", "")
         if len(password) < 24:
@@ -135,14 +150,20 @@ async def run_worker(settings: Settings | None = None) -> None:
                 f"OCR_APP_{app_id.upper().replace('-', '_')}_PASSWORD must be at least 24 "
                 "characters"
             )
+        app_credentials[app_id] = password
         await provision_app_user(responses, app_id, runtime.bullmq_prefix, password)
     try:
         await responses.acl_save()
     except ResponseError as exc:
-        if "No ACL file configured" not in str(exc):
+        error = str(exc).lower()
+        if (
+            "no acl file configured" not in error
+            and "not configured to use an acl file" not in error
+        ):
             raise
         logger.warning(
-            "Redis has no ACL file configured; tenant ACLs will not persist across Redis restarts"
+            "Redis has no ACL file configured; tenant ACLs will be reprovisioned "
+            "after Redis restarts"
         )
 
     workers: list[Worker] = []
@@ -197,8 +218,13 @@ async def run_worker(settings: Settings | None = None) -> None:
             )
         )
         logger.info("Listening for OCR requests app_id=%s queue=%s", app_id, queue_name)
+    acl_refresh_task = asyncio.create_task(
+        provision_app_users_periodically(responses, app_credentials, runtime.bullmq_prefix)
+    )
     try:
         await asyncio.gather(*(worker.run() for worker in workers))
     finally:
+        acl_refresh_task.cancel()
+        await asyncio.gather(acl_refresh_task, return_exceptions=True)
         await asyncio.gather(*(worker.close() for worker in workers))
         await responses.aclose()
