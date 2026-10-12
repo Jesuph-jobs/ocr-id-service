@@ -214,6 +214,7 @@ async def run_worker(settings: Settings | None = None) -> None:
                     "lockDuration": runtime.bullmq_lock_duration_ms,
                     "stalledInterval": runtime.bullmq_stalled_interval_ms,
                     "name": f"{runtime.bullmq_worker_name}-{app_id}",
+                    "autorun": False,
                 },
             )
         )
