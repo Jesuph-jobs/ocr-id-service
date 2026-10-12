@@ -37,7 +37,7 @@ Start the worker in another terminal:
 REDIS_URL=redis://localhost:6379/0 uv run python -m app.main
 ```
 
-The first real scan downloads PaddleOCR model files into Paddle's local cache. `OCR_LANGUAGES=fr,ar` enables French/Latin and Arabic recognition. Set `OCR_LANGUAGES=fr` or `OCR_LANGUAGES=ar` when a narrower workload is more important than bilingual coverage.
+The first scan downloads PaddleOCR model files into the worker user's local cache. `OCR_LANGUAGES=fr,ar` enables French/Latin and Arabic recognition. Set `OCR_LANGUAGES=fr` or `OCR_LANGUAGES=ar` when a narrower workload is more important than bilingual coverage. `OCR_MODEL_PROFILE=mobile` selects smaller CPU models for deployment; `server` selects PaddleOCR's default server detector where additional memory and accuracy are preferred.
 
 ## CLI scan
 
@@ -80,6 +80,8 @@ The client waits for the matching BullMQ result and prints the document verdict 
 
 ## Docker
 
+The image runs a non-root worker with no public HTTP port. It requires an explicit `REDIS_URL`, checks Redis reachability through its Docker health check, and does not include local `.env` files, test documents, development dependencies, or OCR caches in the image. The default `mobile` model profile limits CPU memory use; model downloads require outbound HTTPS on first startup. Configure it as a private Dokploy service and provide its Redis URL through Dokploy's encrypted environment settings.
+
 This compose file runs only the OCR worker and expects Redis to be provided separately, so it does not create a second Redis instance:
 
 ```bash
@@ -88,7 +90,9 @@ cp .env.example .env
 docker compose up --build
 ```
 
-When Redis runs on the host, use a host-reachable address such as `redis://host.docker.internal:6379/0` where supported, or place the worker and Redis on the same user-managed Docker network. The `data/` directory is mounted for shared input images and debug output.
+When Redis runs on the host, use a host-reachable address such as `redis://host.docker.internal:6379/0` where supported, or place the worker and Redis on the same user-managed Docker network. The `data/` directory is mounted for shared input images and debug output, and a named volume preserves downloaded PaddleOCR models across restarts.
+
+For the isolated Yinvesti v2 test deployment, use `docker-compose.dokploy.yml` as the Dokploy Compose file. It builds this worker, provisions a private Redis service on the same Compose network, uses the dedicated `yinvesti-kyc-ocr` queue, and publishes no ports. Set a generated `REDIS_PASSWORD` in Dokploy's encrypted Compose environment before deploying. This stack is a hosting smoke target; connecting the Yinvesti API to its Redis queue and storing scan records are separate integration work.
 
 ## Extraction and validation
 

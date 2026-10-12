@@ -1,0 +1,40 @@
+services:
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "no", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in Dokploy}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in Dokploy}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      BULLMQ_QUEUE: yinvesti-kyc-ocr
+      BULLMQ_PREFIX: bull
+      BULLMQ_WORKER_NAME: yinvesti-v2-ocr
+      BULLMQ_CONCURRENCY: 1
+      OCR_LANGUAGES: fr,ar
+      OCR_MODEL_PROFILE: mobile
+      OCR_USE_GPU: "false"
+      OCR_DEBUG: "false"
+      OCR_MAX_IMAGE_MB: 10
+      OCR_LOG_LEVEL: INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ocr_model_cache:/home/ocr/.paddlex
+      - ocr_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  ocr_model_cache:
+  ocr_data:

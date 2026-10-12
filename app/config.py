@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
-    redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
+    redis_url: str = Field(validation_alias="REDIS_URL", min_length=1)
     bullmq_queue: str = Field(default="algerian-id-ocr", validation_alias="BULLMQ_QUEUE")
     bullmq_prefix: str = Field(default="bull", validation_alias="BULLMQ_PREFIX")
     bullmq_worker_name: str = Field(
@@ -25,6 +26,9 @@ class Settings(BaseSettings):
         default=60000, validation_alias="BULLMQ_STALLED_INTERVAL_MS", gt=0
     )
     ocr_languages: str = Field(default="fr,ar", validation_alias="OCR_LANGUAGES")
+    ocr_model_profile: Literal["mobile", "server"] = Field(
+        default="mobile", validation_alias="OCR_MODEL_PROFILE"
+    )
     ocr_use_gpu: bool = Field(default=False, validation_alias="OCR_USE_GPU")
     ocr_debug: bool = Field(default=False, validation_alias="OCR_DEBUG")
     ocr_debug_dir: str = Field(default="data/output/debug", validation_alias="OCR_DEBUG_DIR")

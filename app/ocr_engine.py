@@ -47,6 +47,20 @@ class AlgerianIDOCR:
         kwargs: dict[str, Any] = {}
         if "lang" in parameters:
             kwargs["lang"] = language
+        mobile_recognition_models = {
+            "fr": "latin_PP-OCRv5_mobile_rec",
+            "ar": "arabic_PP-OCRv5_mobile_rec",
+            "en": "en_PP-OCRv5_mobile_rec",
+        }
+        if (
+            self.settings.ocr_model_profile == "mobile"
+            and language in mobile_recognition_models
+            and "text_detection_model_name" in parameters
+            and "text_recognition_model_name" in parameters
+        ):
+            kwargs.pop("lang", None)
+            kwargs["text_detection_model_name"] = "PP-OCRv5_mobile_det"
+            kwargs["text_recognition_model_name"] = mobile_recognition_models[language]
         if "device" in parameters:
             kwargs["device"] = "cpu"
         elif "use_gpu" in parameters:

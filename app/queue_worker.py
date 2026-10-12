@@ -85,7 +85,9 @@ async def run_worker(settings: Settings | None = None) -> None:
             "name": runtime.bullmq_worker_name,
         },
     )
-    logger.info("Listening on BullMQ queue=%s redis=%s", runtime.bullmq_queue, runtime.redis_url)
+    logger.info(
+        "Listening on BullMQ queue=%s with configured Redis connection", runtime.bullmq_queue
+    )
     try:
         await worker.run()
     finally:

@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "rapidfuzz>=3.10.0",
+    "redis>=7.4.1",
 ]
 
 [dependency-groups]
