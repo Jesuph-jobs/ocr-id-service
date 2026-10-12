@@ -10,9 +10,9 @@ This project performs image OCR and heuristic document classification. It does n
 
 ## Architecture
 
-A TypeScript or NestJS producer adds a `scan-id` job to the `algerian-id-ocr` BullMQ queue. The Python worker consumes it, scans the image, and stores the structured result as BullMQ's job `returnvalue`. Producers can listen with `QueueEvents` or inspect the job state and return value. Jobs accept `{ "image_path": "card.jpg" }` for a shared mounted directory or `{ "image_base64": "..." }` when the image must cross a host boundary.
+A TypeScript or NestJS backend submits each request to an app-scoped BullMQ queue such as `ocr-billing-requests`. The Python worker processes the image and writes a response to that app's per-request Redis response list, `ocr:responses:<app-id>:<request-id>`. The response is retained until consumed or its 24-hour TTL expires. The app receives a tenant-scoped Redis ACL user; the app ID identifies the namespace while the Redis credential enforces access. Jobs accept `image_base64` for independent containers; `image_path` is available only when a trusted producer shares the worker's input volume.
 
-The Python worker uses the official BullMQ Python library and the same Redis/Lua queue contract as the Node.js BullMQ package. No HTTP server is required; this makes it suitable as a standalone worker behind an existing backend.
+The Python worker uses the official BullMQ Python library and the same Redis/Lua queue contract as the Node.js BullMQ package. It connects only to Redis and the local model/cache/input volumes; it has no database connection and does not persist OCR output outside the response queue. No HTTP server is required; this makes it suitable as a standalone worker behind existing app backends.
 
 ## Requirements
 
@@ -49,26 +49,22 @@ uv run python scripts/scan_image.py data/input/card.jpg --debug
 
 With `OCR_DEBUG=true` or `--debug`, preprocessing stages, OCR detections, and the extracted result are written below `data/output/debug/<image-name>/`. Real identity images and generated output are ignored by Git.
 
-## BullMQ producer example
+## Node backend client
 
 ```ts
-import { Queue, QueueEvents } from 'bullmq';
+import { OcrIdClient } from '@ocr-id-service/node';
 
-const connection = { host: 'localhost', port: 6379 };
-const queue = new Queue('algerian-id-ocr', { connection });
-const events = new QueueEvents('algerian-id-ocr', { connection });
-const job = await queue.add('scan-id', { image_path: 'card.jpg' });
-
-events.on('completed', ({ jobId, returnvalue }) => {
-  if (jobId === job.id) console.log(JSON.parse(returnvalue));
-});
+const ocr = new OcrIdClient({ appId: 'billing', redisUrl: process.env.OCR_REDIS_URL! });
+const job = await ocr.submitScan({ imageBase64, requestId: crypto.randomUUID() });
+const result = await ocr.waitForResult(job.id!);
+await ocr.close();
 ```
 
-For separate containers or hosts, send `image_base64` instead of `image_path`; for a shared volume, mount the same image directory into both services. Keep the queue name, Redis database, and BullMQ prefix (`bull` by default) aligned. The CPU worker processes one job at a time by default and uses an extended lock duration because model inference can exceed BullMQ's default lock.
+See [docs/integration.md](docs/integration.md) for app onboarding, ACL isolation, response envelope, and backend integration guidance. Never give an app the Redis default/admin credential or expose Redis credentials to a browser.
 
 ## TypeScript queue test client
 
-Start Redis and the Python worker, install the optional TypeScript test dependencies, then submit an image:
+Start Redis and the Python worker with `OCR_APP_IDS` and an app password configured, install the optional TypeScript test dependencies, then submit an image:
 
 ```bash
 REDIS_URL=redis://localhost:6379/0 uv run python -m app.main
@@ -76,7 +72,7 @@ pnpm install
 pnpm test:queue -- data/input/card.jpg
 ```
 
-The client waits for the matching BullMQ result and prints the document verdict and extracted identity fields. The result includes `national_id`, `passport`, `driving_license`, or `unknown`; a biometric chip cannot be inferred from an image alone.
+The client waits for the matching app-scoped response and prints the document verdict and extracted identity fields. The result includes `national_id`, `passport`, `driving_license`, or `unknown`; a biometric chip cannot be inferred from an image alone.
 
 ## Docker
 
@@ -92,7 +88,7 @@ docker compose up --build
 
 When Redis runs on the host, use a host-reachable address such as `redis://host.docker.internal:6379/0` where supported, or place the worker and Redis on the same user-managed Docker network. The `data/` directory is mounted for shared input images and debug output, and a named volume preserves downloaded PaddleOCR models across restarts.
 
-For the isolated Yinvesti v2 test deployment, use `docker-compose.dokploy.yml` as the Dokploy Compose file. It builds this worker, provisions a private Redis service on the same Compose network, uses the dedicated `yinvesti-kyc-ocr` queue, and publishes no ports. Set a generated `REDIS_PASSWORD` in Dokploy's encrypted Compose environment before deploying. This stack is a hosting smoke target; connecting the Yinvesti API to its Redis queue and storing scan records are separate integration work.
+For the shared Moustachir deployment, create a Dokploy Application from this repository and set its build type to **Dockerfile** (`Dockerfile`, context `.`). Deploy it in the `Main services` production environment on Dokploy's private application network so it can use the already-hosted Main Redis service; do not create a Compose stack or another Redis service. Provide the admin Redis URL and app-specific credentials through Dokploy's encrypted application environment. Add each onboarded app ID to `OCR_APP_IDS` and add its matching `OCR_APP_<ID>_PASSWORD` variable before redeploying; the worker provisions the scoped Redis ACL user and consumes that app's request queue. Redis ACL persistence must be enabled on the existing Redis service for tenant credentials to survive Redis restarts.
 
 ## Extraction and validation
 

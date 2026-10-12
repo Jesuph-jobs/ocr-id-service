@@ -3,18 +3,77 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from bullmq import Job, Worker
+from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from app.config import Settings, get_settings
 from app.ocr_engine import AlgerianIDOCR
 from app.utils import decode_base64_image
 
 logger = logging.getLogger(__name__)
+APP_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def parse_app_ids(value: str) -> list[str]:
+    """Parse and validate the configured tenant IDs."""
+
+    app_ids = [item.strip().lower() for item in value.split(",") if item.strip()]
+    if not app_ids:
+        raise ValueError("OCR_APP_IDS must contain at least one app ID")
+    if len(set(app_ids)) != len(app_ids):
+        raise ValueError("OCR_APP_IDS contains duplicate app IDs")
+    invalid = [app_id for app_id in app_ids if not APP_ID_PATTERN.fullmatch(app_id)]
+    if invalid:
+        raise ValueError(f"Invalid OCR app ID(s): {', '.join(invalid)}")
+    return app_ids
+
+
+def request_queue_name(app_id: str) -> str:
+    """Return the BullMQ request queue assigned to one app."""
+
+    return f"ocr-{app_id}-requests"
+
+
+def response_queue_key(app_id: str, request_id: str) -> str:
+    """Return an app-scoped, request-specific response list key."""
+
+    if not request_id or ":" in request_id or len(request_id) > 128:
+        raise ValueError("request ID must be non-empty, at most 128 characters, and contain no ':'")
+    return f"ocr:responses:{app_id}:{request_id}"
+
+
+async def provision_app_user(redis: Redis, app_id: str, prefix: str, password: str) -> None:
+    """Create a tenant Redis user limited to its BullMQ and response keys."""
+
+    queue_pattern = f"{prefix}:{request_queue_name(app_id)}*"
+    response_pattern = f"ocr:responses:{app_id}:*"
+    await redis.acl_setuser(
+        f"ocr_{app_id}",
+        enabled=True,
+        passwords=f"+{password}",
+        categories=["+@all", "-@admin", "-@dangerous"],
+        commands=[
+            "+info",
+            "-acl",
+            "-config",
+            "-flushdb",
+            "-flushall",
+            "-shutdown",
+            "-module",
+        ],
+        keys=[queue_pattern, response_pattern],
+        channels=[f"{prefix}:{request_queue_name(app_id)}*"],
+        reset=True,
+    )
 
 
 def _safe_input_path(raw_path: str, input_dir: Path, max_image_mb: int) -> Path:
@@ -65,30 +124,81 @@ async def run_worker(settings: Settings | None = None) -> None:
     """Run the long-lived BullMQ worker until interrupted."""
 
     runtime = settings or get_settings()
+    app_ids = parse_app_ids(runtime.ocr_app_ids)
     Path(runtime.ocr_input_dir).mkdir(parents=True, exist_ok=True)
     engine = AlgerianIDOCR(runtime)
-
-    async def processor(job: Job, token: str) -> dict[str, Any]:
-        del token
-        logger.info("Processing BullMQ job id=%s name=%s", job.id, job.name)
-        return await process_job(job, engine, runtime)
-
-    worker = Worker(
-        runtime.bullmq_queue,
-        processor,
-        {
-            "connection": runtime.redis_url,
-            "prefix": runtime.bullmq_prefix,
-            "concurrency": runtime.bullmq_concurrency,
-            "lockDuration": runtime.bullmq_lock_duration_ms,
-            "stalledInterval": runtime.bullmq_stalled_interval_ms,
-            "name": runtime.bullmq_worker_name,
-        },
-    )
-    logger.info(
-        "Listening on BullMQ queue=%s with configured Redis connection", runtime.bullmq_queue
-    )
+    responses: Redis = Redis.from_url(runtime.redis_url, decode_responses=True)
+    for app_id in app_ids:
+        password = os.getenv(f"OCR_APP_{app_id.upper().replace('-', '_')}_PASSWORD", "")
+        if len(password) < 24:
+            raise ValueError(
+                f"OCR_APP_{app_id.upper().replace('-', '_')}_PASSWORD must be at least 24 "
+                "characters"
+            )
+        await provision_app_user(responses, app_id, runtime.bullmq_prefix, password)
     try:
-        await worker.run()
+        await responses.acl_save()
+    except ResponseError as exc:
+        if "No ACL file configured" not in str(exc):
+            raise
+        logger.warning(
+            "Redis has no ACL file configured; tenant ACLs will not persist across Redis restarts"
+        )
+
+    workers: list[Worker] = []
+
+    def processor_for(tenant_id: str) -> Any:
+        async def processor(job: Job, token: Any) -> dict[str, Any]:
+            del token
+            request_id = str(job.id or "")
+            logger.info("Processing OCR request app_id=%s request_id=%s", tenant_id, request_id)
+            try:
+                result = await process_job(job, engine, runtime)
+                envelope: dict[str, Any] = {
+                    "app_id": tenant_id,
+                    "request_id": request_id,
+                    "state": "completed",
+                    "result": result,
+                    "error": None,
+                }
+            except Exception as exc:
+                logger.exception(
+                    "OCR request failed app_id=%s request_id=%s", tenant_id, request_id
+                )
+                envelope = {
+                    "app_id": tenant_id,
+                    "request_id": request_id,
+                    "state": "failed",
+                    "result": None,
+                    "error": str(exc),
+                }
+            response_key = response_queue_key(tenant_id, request_id)
+            await responses.rpush(response_key, json.dumps(envelope, separators=(",", ":")))
+            await responses.expire(response_key, runtime.ocr_response_ttl_seconds)
+            return {"request_id": request_id, "response_enqueued": True}
+
+        return processor
+
+    for app_id in app_ids:
+        queue_name = request_queue_name(app_id)
+
+        workers.append(
+            Worker(
+                queue_name,
+                processor_for(app_id),
+                {
+                    "connection": runtime.redis_url,
+                    "prefix": runtime.bullmq_prefix,
+                    "concurrency": runtime.bullmq_concurrency,
+                    "lockDuration": runtime.bullmq_lock_duration_ms,
+                    "stalledInterval": runtime.bullmq_stalled_interval_ms,
+                    "name": f"{runtime.bullmq_worker_name}-{app_id}",
+                },
+            )
+        )
+        logger.info("Listening for OCR requests app_id=%s queue=%s", app_id, queue_name)
+    try:
+        await asyncio.gather(*(worker.run() for worker in workers))
     finally:
-        await worker.close()
+        await asyncio.gather(*(worker.close() for worker in workers))
+        await responses.aclose()

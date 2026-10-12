@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
     redis_url: str = Field(validation_alias="REDIS_URL", min_length=1)
-    bullmq_queue: str = Field(default="algerian-id-ocr", validation_alias="BULLMQ_QUEUE")
+    ocr_app_ids: str = Field(default="", validation_alias="OCR_APP_IDS")
+    ocr_response_ttl_seconds: int = Field(
+        default=86400, validation_alias="OCR_RESPONSE_TTL_SECONDS", gt=0
+    )
     bullmq_prefix: str = Field(default="bull", validation_alias="BULLMQ_PREFIX")
     bullmq_worker_name: str = Field(
         default="algerian-id-ocr-python", validation_alias="BULLMQ_WORKER_NAME"

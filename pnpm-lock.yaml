@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@ocr-id-service/node':
+        specifier: workspace:*
+        version: link:packages/node
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3
@@ -35,6 +38,9 @@ importers:
       bullmq:
         specifier: ^5.77.0
         version: 5.81.4
+      ioredis:
+        specifier: ^5.7.0
+        version: 5.11.1
     devDependencies:
       typescript:
         specifier: ^5.9.0

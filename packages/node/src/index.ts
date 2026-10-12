@@ -1,5 +1,7 @@
-import { Job, Queue, QueueEvents, type JobsOptions } from "bullmq";
-import type { OcrJobStatus, OcrResult, OcrScanInput } from "@ocr-id-service/contracts";
+import { Job, Queue, type JobsOptions } from "bullmq";
+import { Redis } from "ioredis";
+import { randomUUID } from "node:crypto";
+import type { OcrJobStatus, OcrResult, OcrScanInput, OcrServiceResponse } from "@ocr-id-service/contracts";
 
 export interface RedisConnection {
   host: string;
@@ -12,7 +14,7 @@ export interface RedisConnection {
 
 export interface OcrIdClientOptions {
   redisUrl: string;
-  queueName?: string;
+  appId: string;
   prefix?: string;
 }
 
@@ -39,13 +41,13 @@ export function redisConnection(redisUrl: string): RedisConnection {
   };
 }
 
-function toWorkerInput(input: OcrScanInput): Record<string, string> {
+function toWorkerInput(input: OcrScanInput, requestId: string): Record<string, string> {
   if (!input.imagePath && !input.imageBase64) throw new Error("imagePath or imageBase64 is required");
   if (input.imagePath && input.imageBase64) throw new Error("Provide only one image source");
   return {
     ...(input.imagePath ? { image_path: input.imagePath } : {}),
     ...(input.imageBase64 ? { image_base64: input.imageBase64 } : {}),
-    ...(input.requestId ? { request_id: input.requestId } : {}),
+    request_id: requestId,
     ...(input.userId ? { user_id: input.userId } : {}),
     ...(input.documentId ? { document_id: input.documentId } : {}),
     ...(input.documentSide ? { document_side: input.documentSide } : {}),
@@ -56,45 +58,76 @@ function toWorkerInput(input: OcrScanInput): Record<string, string> {
 /** BullMQ client for submitting scans and waiting for Python worker results. */
 export class OcrIdClient {
   private readonly queue: Queue;
-  private readonly events: QueueEvents;
+  private readonly responses: Redis;
   private readonly queueName: string;
+  private readonly appId: string;
 
   public constructor(options: OcrIdClientOptions) {
-    this.queueName = options.queueName ?? "algerian-id-ocr";
+    if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(options.appId)) throw new Error("appId must use lowercase letters, numbers, '_' or '-' (max 63 characters)");
+    this.appId = options.appId;
+    this.queueName = `ocr-${options.appId}-requests`;
     const connection = redisConnection(options.redisUrl);
     this.queue = new Queue(this.queueName, { connection, prefix: options.prefix });
-    this.events = new QueueEvents(this.queueName, { connection, prefix: options.prefix });
+    this.responses = new Redis(options.redisUrl, { maxRetriesPerRequest: null });
   }
 
   public async submitScan(input: SubmitScanOptions): Promise<Job> {
     const { jobId, attempts = 2, ...scan } = input;
+    const requestId = jobId ?? scan.requestId ?? randomUUID();
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new Error("requestId must be 1–128 letters, numbers, '_' or '-'");
     const jobOptions: JobsOptions = {
-      ...(jobId ? { jobId } : {}),
+      jobId: requestId,
       attempts,
       backoff: { type: "exponential", delay: 1000 },
       removeOnComplete: { age: 86400, count: 1000 },
       removeOnFail: { age: 604800, count: 1000 },
     };
-    return this.queue.add("scan-id", toWorkerInput(scan), jobOptions);
+    return this.queue.add("scan-id", toWorkerInput(scan, requestId), jobOptions);
   }
 
   public async waitForResult(jobId: string, timeoutMs = 300000): Promise<OcrResult> {
-    await this.events.waitUntilReady();
-    const job = await this.queue.getJob(jobId);
-    if (!job) throw new Error(`OCR job ${jobId} was not found`);
-    return (await job.waitUntilFinished(this.events, timeoutMs)) as OcrResult;
+    const response = await this.waitForResponse(jobId, timeoutMs);
+    if (response.state === "failed" || !response.result) throw new Error(response.error ?? "OCR request failed");
+    return response.result;
+  }
+
+  public async waitForResponse(requestId: string, timeoutMs = 300000): Promise<OcrServiceResponse> {
+    const responseKey = `ocr:responses:${this.appId}:${requestId}`;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const remainingSeconds = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+      const response = await this.responses.blpop(responseKey, remainingSeconds);
+      if (!response) break;
+      const parsed = JSON.parse(response[1]) as OcrServiceResponse;
+      if (parsed.app_id !== this.appId || parsed.request_id !== requestId) {
+        throw new Error("OCR response identity does not match the requested app and request");
+      }
+      return parsed;
+    }
+    throw new Error(`Timed out waiting for OCR response ${requestId}`);
   }
 
   public async getStatus(jobId: string): Promise<OcrJobStatus> {
     const job = await this.queue.getJob(jobId);
     if (!job) return { jobId, state: "failed", error: "Job not found" };
     const state = await job.getState();
-    if (state === "completed") return { jobId, state, result: job.returnvalue as OcrResult };
+    if (state === "completed") {
+      const rawResponse = await this.responses.lindex(`ocr:responses:${this.appId}:${jobId}`, 0);
+      if (!rawResponse) return { jobId, state };
+      const response = JSON.parse(rawResponse) as OcrServiceResponse;
+      if (response.app_id !== this.appId || response.request_id !== jobId) {
+        throw new Error("OCR response identity does not match the requested app and request");
+      }
+      if (response.state === "failed") {
+        return { jobId, state: "failed", error: response.error ?? "OCR request failed" };
+      }
+      return { jobId, state, result: response.result ?? undefined };
+    }
     if (state === "failed") return { jobId, state, error: job.failedReason };
     return { jobId, state: state === "active" ? "processing" : "queued" };
   }
 
   public async close(): Promise<void> {
-    await Promise.all([this.events.close(), this.queue.close()]);
+    await Promise.all([this.queue.close(), this.responses.quit()]);
   }
 }
