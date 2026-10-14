@@ -18,6 +18,14 @@ from app.extractor import extract_identity
 from app.models import OCRDetection, OCRResult
 from app.preprocessing import preprocess_image, rotate_image
 
+
+def document_confidence(detections: list[OCRDetection], extracted_completeness: float, document_type_confidence: float) -> float:
+    """Return an uncalibrated review signal: 60% readability, 25% type, 15% completeness."""
+
+    text_readability = sum(item.confidence for item in detections) / len(detections) if detections else 0.0
+    score = 0.6 * text_readability + 0.25 * document_type_confidence + 0.15 * extracted_completeness
+    return round(max(0.0, min(1.0, score)), 4)
+
 logger = logging.getLogger(__name__)
 
 
@@ -223,12 +231,14 @@ class AlgerianIDOCR:
                     ),
                     encoding="utf-8",
                 )
-            confidence = (
-                sum(d.confidence for d in detections) / len(detections) if detections else 0.0
-            )
             return OCRResult(
                 success=bool(detections),
-                confidence=round(confidence, 4),
+                confidence=document_confidence(
+                    detections,
+                    extracted.confidence,
+                    extracted.fields.document_type_confidence,
+                ),
+                field_confidence=extracted.field_confidence,
                 fields=extracted.fields,
                 raw_text=raw_text,
                 detections=detections,

@@ -18,6 +18,40 @@ OCR output is not written to a database. A response remains only in its app/requ
 
 The app ID is a namespace, not an authentication secret. Redis ACL credentials enforce isolation. Do not reuse the admin password across applications.
 
+## Current service boundary
+
+- The worker accepts `image_base64` or `image_path`. `image_path` requires a trusted volume shared with the worker; independent applications should use base64 for a controlled pilot. PDF rasterization and direct S3/MinIO object-key fetching are not implemented.
+- Base64 image bytes remain in the BullMQ job while queued or processing. The client removes completed/failed jobs, and the worker removes its temporary local input after processing; Redis persistence and backups still follow the existing Redis service configuration.
+- The response includes extracted identity fields and raw OCR text. Treat the entire response as sensitive; keep it out of logs, analytics, and browser payloads unless the host application's access policy explicitly allows the needed fields.
+- The worker is an extractor, not a KYC decision engine. It does not verify government records, authenticity, biometrics, or NFC/chip data. Passport and driving-license classification are experimental; PDFs are unsupported; OCR output needs human review.
+- The current Node client is a pnpm workspace package and depends on `@ocr-id-service/contracts` with `workspace:*`. A separate application repository cannot install it directly as-is; publish a versioned package or vendor/workspace-pin the client and contracts to an exact commit before production integration.
+
+## Local development
+
+Run a local Redis instance separately from the OCR worker:
+
+```sh
+docker run --rm --name ocr-dev-redis -p 6379:6379 redis:7-alpine
+```
+
+From the OCR repository, configure a local tenant and start the worker in another terminal:
+
+```sh
+export OCR_APP_IDS=demo
+export OCR_APP_DEMO_PASSWORD="$(openssl rand -hex 32)"
+export REDIS_URL=redis://127.0.0.1:6379/0
+uv run python -m app.main
+```
+
+Run the sample queue client with that tenant's restricted Redis user:
+
+```sh
+export OCR_REDIS_URL="redis://ocr_demo:${OCR_APP_DEMO_PASSWORD}@127.0.0.1:6379/0"
+OCR_APP_ID=demo pnpm test:queue -- /path/to/synthetic-id-image.jpg
+```
+
+The `pnpm test:queue` script currently prints extracted fields as JSON, so use only synthetic fixtures in CI, shared terminals, or retained shell logs until the script is redacted. The worker downloads PaddleOCR model files on first startup and therefore needs outbound HTTPS. Dokploy deployment uses the repository Dockerfile and the already-hosted Redis service; do not use the example Compose file to create another Redis instance.
+
 ## Node backend
 
 ```ts

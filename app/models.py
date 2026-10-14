@@ -22,6 +22,8 @@ class IdentityFields(BaseModel):
     document_type_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     first_name: str | None = None
     last_name: str | None = None
+    first_name_ar: str | None = None
+    last_name_ar: str | None = None
     arabic_name: str | None = None
     birth_date: str | None = None
     birth_place: str | None = None
@@ -37,6 +39,7 @@ class OCRResult(BaseModel):
 
     success: bool
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    field_confidence: dict[str, float] = Field(default_factory=dict)
     fields: IdentityFields = Field(default_factory=IdentityFields)
     raw_text: list[str] = Field(default_factory=list)
     detections: list[OCRDetection] = Field(default_factory=list)

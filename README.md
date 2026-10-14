@@ -8,6 +8,8 @@ Algerian CNI is the supported and tested document type. The classifier has exper
 
 This project performs image OCR and heuristic document classification. It does not verify government records, read NFC/chips, prove biometric authenticity, perform face matching, or replace a KYC/identity provider. OCR results must be reviewed and validated against an authoritative record before making an identity decision.
 
+OCR results include a document-level `confidence` review signal computed as `0.60 × mean text-detection confidence + 0.25 × document-type classifier confidence + 0.15 × extracted-field completeness`. `field_confidence` maps each extracted identity field to the highest PaddleOCR confidence among detections that support its value; absent fields and values without a matching text detection score `0`. These values are heuristic signals, not calibrated probabilities that a document or identity is correct, and must not be used alone to approve KYC.
+
 ## Architecture
 
 A TypeScript or NestJS backend submits each request to an app-scoped BullMQ queue such as `ocr-billing-requests`. The Python worker processes the image and writes a response to that app's per-request Redis response list, `ocr:responses:<app-id>:<request-id>`. The response is retained until consumed or its 24-hour TTL expires. The app receives a tenant-scoped Redis ACL user; the app ID identifies the namespace while the Redis credential enforces access. Jobs accept `image_base64` for independent containers; `image_path` is available only when a trusted producer shares the worker's input volume.

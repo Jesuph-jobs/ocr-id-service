@@ -18,6 +18,8 @@ export interface OcrIdentityFields {
   document_type_confidence: number;
   first_name: string | null;
   last_name: string | null;
+  first_name_ar: string | null;
+  last_name_ar: string | null;
   arabic_name: string | null;
   birth_date: string | null;
   birth_place: string | null;
@@ -30,6 +32,7 @@ export interface OcrIdentityFields {
 export interface OcrResult {
   success: boolean;
   confidence: number;
+  field_confidence: Record<string, number>;
   fields: OcrIdentityFields;
   raw_text: string[];
   processing_time_ms: number;

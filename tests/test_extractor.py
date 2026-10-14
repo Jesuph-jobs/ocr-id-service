@@ -1,4 +1,6 @@
 from app.extractor import extract_identity
+from app.models import OCRDetection
+from app.ocr_engine import document_confidence
 
 
 def test_extracts_labeled_french_fields_and_spaced_nin() -> None:
@@ -24,6 +26,26 @@ def test_extracts_labeled_french_fields_and_spaced_nin() -> None:
     assert result.fields.document_number == "987654321"
     assert result.fields.arabic_name == "أحمد بن علي"
     assert result.fields.document_type == "unknown"
+    assert result.field_confidence["document_type"] == 0.0
+
+
+def test_field_confidence_uses_supporting_detection_and_zero_for_missing_values() -> None:
+    detections = [
+        OCRDetection(text="NOM: BENALI", confidence=0.93),
+        OCRDetection(text="NIN: 123456789012345678", confidence=0.88),
+        OCRDetection(text="مكان الميلاد", confidence=0.91),
+        OCRDetection(text="الجزائر", confidence=0.81),
+    ]
+    result = extract_identity([item.text for item in detections], detections)
+
+    assert result.field_confidence["last_name"] == 0.93
+    assert result.field_confidence["nin"] == 0.88
+    assert result.field_confidence["birth_place"] == 0.81
+    assert result.field_confidence["first_name"] == 0.0
+
+
+def test_document_confidence_combines_readability_type_and_completeness() -> None:
+    assert document_confidence([OCRDetection(text="TEXT", confidence=0.8)], 0.9, 0.6) == 0.765
 
 
 def test_falls_back_to_eighteen_digit_nin_and_handles_ocr_date() -> None:

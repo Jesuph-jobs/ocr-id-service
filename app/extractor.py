@@ -81,6 +81,7 @@ class ExtractedIdentity:
 
     fields: IdentityFields
     confidence: float
+    field_confidence: dict[str, float]
 
 
 def _is_label(line: str, candidates: tuple[str, ...]) -> bool:
@@ -343,6 +344,8 @@ def extract_identity(
         document_type_confidence=document_type_confidence,
         first_name=_clean_name(_find_labeled_value(lines, "first_name")) or mrz_first_name,
         last_name=_clean_name(_find_labeled_value(lines, "last_name")) or mrz_last_name,
+        first_name_ar=_arabic_label_value(lines, "first_name"),
+        last_name_ar=_arabic_label_value(lines, "last_name"),
         arabic_name=arabic_name,
         birth_date=_normalize_date(_find_labeled_value(lines, "birth_date")) or _oldest_date(lines),
         birth_place=_clean_name(_find_labeled_value(lines, "birth_place"))
@@ -352,8 +355,30 @@ def extract_identity(
         document_number=document_number,
     )
     extractable = fields.model_dump(exclude={"document_type", "document_type_confidence"})
+    detections_by_name: dict[str, float] = {}
+    for key, value in extractable.items():
+        if value is None:
+            detections_by_name[key] = 0.0
+            continue
+        value_text = normalize_text(str(value)).casefold()
+        normalized_value = normalize_label(str(value))
+        numeric_value = compact_digits(str(value))
+        supporting = []
+        for detection in detections or []:
+            detection_text = normalize_text(detection.text).casefold()
+            if (numeric_value and numeric_value in compact_digits(detection.text)) or (
+                value_text and value_text in detection_text
+            ) or (normalized_value and normalized_value in normalize_label(detection.text)):
+                supporting.append(detection.confidence)
+        # A parsed value may come from a multi-token fallback. Keep its score
+        # conservative when no OCR box directly supports it.
+        detections_by_name[key] = round(max(supporting) if supporting else 0.0, 4)
     populated = sum(value is not None for value in extractable.values())
-    return ExtractedIdentity(fields=fields, confidence=populated / len(extractable))
+    return ExtractedIdentity(
+        fields=fields,
+        confidence=populated / len(extractable),
+        field_confidence={"document_type": document_type_confidence, **detections_by_name},
+    )
 
 
 def _oldest_date(lines: list[str]) -> str | None:
